@@ -122,6 +122,9 @@ struct XCAFLabelInfo {
 
 /// Arena-based OCCT kernel — full brepjs KernelAdapter coverage.
 class OcctKernel {
+    // MeshWeave Edit: facade/src/mw_edit.cpp reaches the arena through this.
+    friend struct MwEdit;
+
   public:
     OcctKernel();
     ~OcctKernel();
