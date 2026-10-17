@@ -74,6 +74,7 @@
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <NCollection_IndexedDataMap.hxx>
+#include <NCollection_HSequence.hxx>
 #include <NCollection_IndexedMap.hxx>
 #include <NCollection_List.hxx>
 #include <NCollection_Vec3.hxx>
@@ -89,7 +90,6 @@
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopLoc_Location.hxx>
-#include <TopTools_HSequenceOfShape.hxx>
 #include <TopTools_ShapeMapHasher.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
@@ -764,10 +764,10 @@ EvolutionData mwRemoveFaces(OcctKernel& k, uint32_t id, std::vector<int> faces, 
 EvolutionData mwFillHole(OcctKernel& k, uint32_t id, std::vector<int> edges) {
     return guarded("fillHole", [&] {
         const TopoDS_Shape& s = MwEdit::get(k, id);
-        Handle(TopTools_HSequenceOfShape) seq = new TopTools_HSequenceOfShape;
+        Handle(NCollection_HSequence<TopoDS_Shape>) seq = new NCollection_HSequence<TopoDS_Shape>;
         for (const TopoDS_Edge& e : pickEdges(s, edges, "fillHole")) seq->Append(e);
-        Handle(TopTools_HSequenceOfShape) wires;
-        ShapeAnalysis_FreeBounds::ConnectEdgesToWires(seq, 1e-6 * bboxDiag(s), false, wires);
+        Handle(NCollection_HSequence<TopoDS_Shape>) wires =
+            ShapeAnalysis_FreeBounds::ConnectEdgesToWires(seq, 1e-6 * bboxDiag(s), false);
         AncestorMap anc;
         TopExp::MapShapesAndUniqueAncestors(s, TopAbs_EDGE, TopAbs_FACE, anc);
         std::vector<TopoDS_Face> caps;
