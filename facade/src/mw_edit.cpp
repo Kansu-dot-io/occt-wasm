@@ -44,6 +44,7 @@
 #include <BRepAlgoAPI_Section.hxx>
 #include <BRepAlgoAPI_Splitter.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
 #include <BRepBuilderAPI_GTransform.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -71,6 +72,7 @@
 #include <Bnd_Box.hxx>
 #include <GCPnts_TangentialDeflection.hxx>
 #include <GProp_GProps.hxx>
+#include <Geom_Surface.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <NCollection_IndexedDataMap.hxx>
@@ -354,6 +356,41 @@ int bodyCount(const TopoDS_Shape& s, std::vector<TopoDS_Shape>& bodies) {
         for (TopExp_Explorer ex(s, TopAbs_SHELL); ex.More(); ex.Next()) bodies.push_back(ex.Current());
     if (bodies.empty()) bodies.push_back(s);
     return static_cast<int>(bodies.size());
+}
+
+/// Shape healing rebuilds faces without always recording it. An input face
+/// that history lost is matched to an unclaimed result face on the SAME
+/// underlying surface (ShapeFix keeps the Geom_Surface) with the same area to
+/// 1e-6; anything else stays deleted.
+EvolutionData withSurfaceFallback(EvolutionData evo, const TopoDS_Shape& in, const TopoDS_Shape& out) {
+    if (evo.deleted.empty()) return evo;
+    ShapeMap imap = faceMap(in), rmap = faceMap(out);
+    std::vector<bool> claimed(rmap.Extent(), false);
+    for (size_t i = 0; i < evo.modified.size();) {
+        int n = evo.modified[i + 1];
+        for (int j = 0; j < n; ++j) claimed[evo.modified[i + 2 + j]] = true;
+        i += 2 + n;
+    }
+    auto area = [](const TopoDS_Shape& f) { GProp_GProps g; BRepGProp::SurfaceProperties(f, g); return g.Mass(); };
+    std::vector<int> still;
+    for (int gi : evo.deleted) {
+        const TopoDS_Face& f = TopoDS::Face(imap.FindKey(gi + 1));
+        Handle(Geom_Surface) sf = BRep_Tool::Surface(f);
+        double af = area(f);
+        int hit = -1;
+        for (int j = 1; j <= rmap.Extent() && hit < 0; ++j) {
+            if (claimed[j - 1]) continue;
+            const TopoDS_Face& g = TopoDS::Face(rmap.FindKey(j));
+            if (BRep_Tool::Surface(g) == sf && std::abs(area(g) - af) <= 1e-6 * std::max(1.0, af)) hit = j - 1;
+        }
+        if (hit < 0) { still.push_back(gi); continue; }
+        claimed[hit] = true;
+        evo.modified.push_back(gi);
+        evo.modified.push_back(1);
+        evo.modified.push_back(hit);
+    }
+    evo.deleted = still;
+    return evo;
 }
 
 // Mesh output buffers, copied out by the caller straight after mwMesh.
@@ -764,6 +801,7 @@ EvolutionData mwRemoveFaces(OcctKernel& k, uint32_t id, std::vector<int> faces, 
 EvolutionData mwFillHole(OcctKernel& k, uint32_t id, std::vector<int> edges) {
     return guarded("fillHole", [&] {
         const TopoDS_Shape& s = MwEdit::get(k, id);
+        if (edges.empty()) throw std::runtime_error("fillHole: no boundary edges given");
         Handle(NCollection_HSequence<TopoDS_Shape>) seq = new NCollection_HSequence<TopoDS_Shape>;
         for (const TopoDS_Edge& e : pickEdges(s, edges, "fillHole")) seq->Append(e);
         Handle(NCollection_HSequence<TopoDS_Shape>) wires =
@@ -968,9 +1006,36 @@ EvolutionData mwSplitPlane(OcctKernel& k, uint32_t id, double ox, double oy, dou
             if (n == 0) throw std::runtime_error("splitByPlane: nothing of the part is on the kept side");
             r = kept;
         }
+        // The splitter leaves the cut face SHARED by the two sides. A body here
+        // is a closed part of its own (its STL goes to a solver alone), so every
+        // body after the first gets its own copy; shared topology is imprint's job.
+        Handle(BRepTools_History) h = sp.History();
+        std::vector<TopoDS_Shape> parts;
+        bodyCount(r, parts);
+        if (parts.size() > 1) {
+            BRep_Builder b;
+            TopoDS_Compound sep;
+            b.MakeCompound(sep);
+            ShapeMap seen;
+            for (const TopoDS_Shape& part : parts) {
+                bool shares = false;
+                for (TopExp_Explorer ex(part, TopAbs_FACE); ex.More() && !shares; ex.Next())
+                    shares = seen.Contains(ex.Current());
+                if (!shares) {
+                    for (TopExp_Explorer ex(part, TopAbs_FACE); ex.More(); ex.Next()) seen.Add(ex.Current());
+                    b.Add(sep, part);
+                    continue;
+                }
+                BRepBuilderAPI_Copy cp(part, true, false);
+                Handle(BRepTools_History) hc = historyOf({part}, cp);
+                if (!h.IsNull()) h->Merge(hc);
+                b.Add(sep, cp.Shape());
+            }
+            r = sep;
+        }
         r = unwrap(r);
         uint32_t rid = MwEdit::store(k, r);
-        return evolution(rid, {s}, r, sp.History());
+        return evolution(rid, {s}, r, h);
     });
 }
 
@@ -1027,6 +1092,15 @@ EvolutionData mwUnify(OcctKernel& k, uint32_t id) {
 EvolutionData mwHeal(OcctKernel& k, uint32_t id, double tol) {
     return guarded("heal", [&] {
         const TopoDS_Shape& s = MwEdit::get(k, id);
+        // Nothing to heal: a valid shape whose shells are all closed comes back
+        // as it is (re-sewing it would rename every face for no change).
+        bool closed = true;
+        for (TopExp_Explorer ex(s, TopAbs_SHELL); ex.More() && closed; ex.Next())
+            closed = BRep_Tool::IsClosed(ex.Current());
+        if (closed && TopExp_Explorer(s, TopAbs_SHELL).More() && isValid(s)) {
+            uint32_t rid = MwEdit::store(k, s);
+            return evolution(rid, {s}, s, nullptr);
+        }
         BRepBuilderAPI_Sewing sew(tol);
         sew.Add(s);
         sew.Perform();
@@ -1040,7 +1114,7 @@ EvolutionData mwHeal(OcctKernel& k, uint32_t id, double tol) {
         Handle(BRepTools_History) fh = fix.Context()->History();
         if (!fh.IsNull()) h->Merge(fh);
         uint32_t rid = MwEdit::store(k, r);
-        return evolution(rid, {s}, r, h);
+        return withSurfaceFallback(evolution(rid, {s}, r, h), s, r);
     });
 }
 
