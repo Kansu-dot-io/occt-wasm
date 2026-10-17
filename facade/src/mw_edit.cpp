@@ -374,7 +374,9 @@ template <class F> auto guarded(const char* op, F&& f) -> decltype(f()) {
 // Topology and tessellation
 // ===========================================================================
 
-/// [nFaces, nEdges, nBodies, per face 16 doubles, per edge 8 doubles].
+/// [nFaces, nEdges, nBodies, bbox xmin ymin zmin xmax ymax zmax, per face 16
+/// doubles, per edge 8 doubles]. The bbox is BRepBndLib::AddOptimal without
+/// triangulation or tolerances.
 /// Face: surf (0 plane, 1 cylinder, 2 cone, 3 sphere, 4 torus, 5 other), area,
 ///   centroid xyz, dir xyz (plane normal, outward / axis; NaN when none),
 ///   origin xyz (plane location / axis location / centre), r1, r2 (radius,
@@ -396,10 +398,15 @@ std::vector<double> mwTopology(OcctKernel& k, uint32_t id) {
             }
 
         std::vector<double> out;
-        out.reserve(3 + 16 * fm.Extent() + 8 * em.Extent());
+        out.reserve(9 + 16 * fm.Extent() + 8 * em.Extent());
         out.push_back(fm.Extent());
         out.push_back(em.Extent());
         out.push_back(nb);
+        Bnd_Box box;
+        BRepBndLib::AddOptimal(s, box, false, false);
+        double bb[6] = {0, 0, 0, 0, 0, 0};
+        if (!box.IsVoid()) box.Get(bb[0], bb[1], bb[2], bb[3], bb[4], bb[5]);
+        out.insert(out.end(), bb, bb + 6);
         for (int i = 1; i <= fm.Extent(); ++i) {
             const TopoDS_Face& f = TopoDS::Face(fm.FindKey(i));
             GProp_GProps g;
