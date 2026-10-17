@@ -790,7 +790,9 @@ EvolutionData mwFillet(OcctKernel& k, uint32_t id, std::vector<int> edges, std::
         std::vector<TopoDS_Edge> es = pickEdges(s, edges, "fillet");
         BRepFilletAPI_MakeFillet m(s);
         for (size_t i = 0; i < es.size(); ++i) m.Add(radii.size() == 1 ? radii[0] : radii[i], es[i]);
-        m.Build();
+        // A radius that cannot fit can also throw from inside the blend; that is
+        // the same failure, and it should name the edges too.
+        try { m.Build(); } catch (const Standard_Failure&) {}
         if (!m.IsDone()) {
             ShapeMap em = edgeMap(s);
             std::vector<int> bad;
@@ -818,7 +820,7 @@ EvolutionData mwChamfer(OcctKernel& k, uint32_t id, std::vector<int> edges, doub
             if (d2 > 0) m.Add(d1, d2, e, TopoDS::Face(anc.FindFromKey(e).First()));
             else m.Add(d1, e);
         }
-        m.Build();
+        try { m.Build(); } catch (const Standard_Failure&) {}
         if (!m.IsDone()) throw std::runtime_error("chamfer: the distance does not fit" + refList('E', edges));
         TopoDS_Shape r = unwrap(m.Shape());
         if (!isValid(r)) throw std::runtime_error("chamfer: the result is not a valid solid" + refList('E', edges));
