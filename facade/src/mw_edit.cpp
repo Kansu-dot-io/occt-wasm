@@ -63,6 +63,7 @@
 #include <BRepOffsetAPI_MakeFilling.hxx>
 #include <BRepOffsetAPI_MakeOffsetShape.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
+#include <BRepOffset_MakeOffset.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepPrimAPI_MakeRevol.hxx>
 #include <BRepTools_History.hxx>
@@ -867,6 +868,174 @@ EvolutionData mwChamfer(OcctKernel& k, uint32_t id, std::vector<int> edges, doub
     });
 }
 
+/// Variable-radius fillet: per edge a start and an end radius, varying linearly
+/// along the edge. "Start" is the edge's FIRST VERTEX (the end at its first
+/// curve parameter, which is also the first point of its tessellated polyline),
+/// whatever direction OCCT's spine runs; r1r2 = [r1, r2] per edge.
+EvolutionData mwFilletVar(OcctKernel& k, uint32_t id, std::vector<int> edges, std::vector<double> r1r2) {
+    return guarded("fillet", [&] {
+        const TopoDS_Shape& s = MwEdit::get(k, id);
+        if (r1r2.size() != 2 * edges.size())
+            throw std::runtime_error("fillet: give a start and an end radius per edge");
+        for (double r : r1r2)
+            if (!(r > 0)) throw std::runtime_error("fillet: every radius must be > 0" + refList('E', edges));
+        std::vector<TopoDS_Edge> es = pickEdges(s, edges, "fillet");
+        BRepFilletAPI_MakeFillet m(s);
+        double tol = std::max(1e-7, 1e-7 * bboxDiag(s));
+        for (size_t i = 0; i < es.size(); ++i) {
+            double r1 = r1r2[2 * i], r2 = r1r2[2 * i + 1];
+            m.Add(es[i]);
+            int iinc = 0;
+            int ic = m.Contains(es[i], iinc);
+            if (!ic) throw std::runtime_error("fillet: the edge cannot be filleted" + refList('E', {edges[i]}));
+            // The spine may run the edge backwards (tangent chains orient it);
+            // compare its start with the edge's own first vertex.
+            gp_Pnt edgeStart = BRep_Tool::Pnt(TopExp::FirstVertex(es[i], false));
+            gp_Pnt spineStart = BRep_Tool::Pnt(TopExp::FirstVertex(m.Edge(ic, iinc), true));
+            if (edgeStart.Distance(spineStart) > tol + BRep_Tool::Tolerance(TopExp::FirstVertex(es[i], false)))
+                std::swap(r1, r2);
+            m.SetRadius(r1, r2, ic, iinc);
+        }
+        try { m.Build(); } catch (const Standard_Failure&) {}
+        if (!m.IsDone()) {
+            ShapeMap em = edgeMap(s);
+            std::vector<int> bad;
+            for (int c = 1; c <= m.NbFaultyContours(); ++c) {
+                int ic = m.FaultyContour(c);
+                for (int j = 1; j <= m.NbEdges(ic); ++j) bad.push_back(em.FindIndex(m.Edge(ic, j)) - 1);
+            }
+            throw std::runtime_error("fillet: the radius does not fit" + refList('E', bad.empty() ? edges : bad));
+        }
+        TopoDS_Shape r = unwrap(m.Shape());
+        if (!isValid(r)) throw std::runtime_error("fillet: the result is not a valid solid" + refList('E', edges));
+        uint32_t rid = MwEdit::store(k, r);
+        return evolution(rid, {s}, r, historyOf({s}, m));
+    });
+}
+
+/// Chamfer with a reference face per edge: d1 is measured on refFaces[i] (a
+/// face index; -1 = the edge's first face). d2 <= 0 means equal distances.
+EvolutionData mwChamferRef(OcctKernel& k, uint32_t id, std::vector<int> edges, std::vector<int> refFaces,
+                           double d1, double d2) {
+    return guarded("chamfer", [&] {
+        const TopoDS_Shape& s = MwEdit::get(k, id);
+        if (refFaces.size() != edges.size()) throw std::runtime_error("chamfer: give one reference face per edge");
+        AncestorMap anc;
+        TopExp::MapShapesAndUniqueAncestors(s, TopAbs_EDGE, TopAbs_FACE, anc);
+        ShapeMap fm = faceMap(s);
+        BRepFilletAPI_MakeChamfer m(s);
+        std::vector<TopoDS_Edge> es = pickEdges(s, edges, "chamfer");
+        for (size_t i = 0; i < es.size(); ++i) {
+            const ShapeList& adj = anc.FindFromKey(es[i]);
+            TopoDS_Face ref = TopoDS::Face(adj.First());
+            if (refFaces[i] >= 0) {
+                if (refFaces[i] >= fm.Extent())
+                    throw std::runtime_error("chamfer: no face " + std::to_string(refFaces[i]));
+                const TopoDS_Shape& want = fm.FindKey(refFaces[i] + 1);
+                bool found = false;
+                for (const TopoDS_Shape& f : adj)
+                    if (f.IsSame(want)) { ref = TopoDS::Face(f); found = true; }
+                if (!found)
+                    throw std::runtime_error("chamfer: the reference face is not next to the edge" +
+                                             refList('E', {edges[i]}));
+            }
+            if (d2 > 0) m.Add(d1, d2, es[i], ref);
+            else m.Add(d1, es[i]);
+        }
+        try { m.Build(); } catch (const Standard_Failure&) {}
+        if (!m.IsDone()) throw std::runtime_error("chamfer: the distance does not fit" + refList('E', edges));
+        TopoDS_Shape r = unwrap(m.Shape());
+        if (!isValid(r)) throw std::runtime_error("chamfer: the result is not a valid solid" + refList('E', edges));
+        uint32_t rid = MwEdit::store(k, r);
+        return evolution(rid, {s}, r, historyOf({s}, m));
+    });
+}
+
+namespace {
+/// Faces copied into one shell (sewn, so neighbours share edges), oriented as
+/// they were in the part: a solid's faces point outward.
+TopoDS_Shape sheetOf(const std::vector<TopoDS_Face>& fs, double tol) {
+    if (fs.size() == 1) {
+        BRep_Builder b;
+        TopoDS_Shell sh;
+        b.MakeShell(sh);
+        b.Add(sh, BRepBuilderAPI_Copy(fs[0]).Shape());
+        return sh;
+    }
+    BRepBuilderAPI_Sewing sew(tol);
+    for (const TopoDS_Face& f : fs) sew.Add(BRepBuilderAPI_Copy(f).Shape());
+    sew.Perform();
+    return sew.SewedShape();
+}
+
+/// The solid swept by offsetting `sheet` by `t` along its normals (t < 0: against).
+TopoDS_Shape thickSheet(const TopoDS_Shape& sheet, double t, double tol) {
+    for (GeomAbs_JoinType join : {GeomAbs_Intersection, GeomAbs_Arc}) {
+        BRepOffset_MakeOffset mo;
+        mo.Initialize(sheet, t, tol, BRepOffset_Skin, join == GeomAbs_Intersection, false, join, true, false);
+        try { mo.MakeOffsetShape(); } catch (const Standard_Failure&) { continue; }
+        if (mo.IsDone() && isValid(mo.Shape())) return unwrap(mo.Shape());
+    }
+    return TopoDS_Shape();
+}
+} // namespace
+
+/// Thicken faces into a solid: side 0 = outward (along the face normals,
+/// which point out of a solid), 1 = inward, 2 = both (t/2 each way). On a
+/// solid the slab is fused with the part (outward adds material; inward adds
+/// nothing a solid does not already hold, so it is refused); on a sheet
+/// (faces with no solid) the picked faces become the thickened solid and the
+/// rest stays.
+EvolutionData mwThicken(OcctKernel& k, uint32_t id, std::vector<int> faces, double thickness, int side) {
+    return guarded("thicken", [&] {
+        const TopoDS_Shape& s = MwEdit::get(k, id);
+        if (!(thickness > 0)) throw std::runtime_error("thicken: thickness must be > 0" + refList('F', faces));
+        if (faces.empty()) throw std::runtime_error("thicken: pick at least one face");
+        std::vector<TopoDS_Face> fs = pickFaces(s, faces, "thicken");
+        double tol = std::max(1e-6, 1e-6 * bboxDiag(s));
+        bool solidIn = TopExp_Explorer(s, TopAbs_SOLID).More();
+        if (solidIn && side == 1)
+            throw std::runtime_error("thicken: inward on a solid adds nothing; use Shell or Offset" + refList('F', faces));
+        TopoDS_Shape sheet = sheetOf(fs, tol);
+        if (side == 2) {
+            BRepOffset_MakeOffset half;
+            half.Initialize(sheet, -thickness / 2, tol, BRepOffset_Skin, false, false, GeomAbs_Arc, false, false);
+            try { half.MakeOffsetShape(); } catch (const Standard_Failure&) {}
+            if (!half.IsDone()) throw std::runtime_error("thicken: the faces cannot be offset by half the thickness" + refList('F', faces));
+            sheet = half.Shape();
+        }
+        TopoDS_Shape slab = thickSheet(sheet, side == 1 ? -thickness : thickness, tol);
+        if (slab.IsNull())
+            throw std::runtime_error("thicken: the faces cannot be thickened by this amount" + refList('F', faces));
+        if (solidIn) {
+            BRepAlgoAPI_Fuse fuse(s, slab);
+            if (!fuse.IsDone() || fuse.HasErrors())
+                throw std::runtime_error("thicken: joining the thickened faces to the part failed" + refList('F', faces));
+            ShapeUpgrade_UnifySameDomain u(fuse.Shape(), true, true, false);
+            u.Build();
+            TopoDS_Shape r = unwrap(u.Shape());
+            if (!isValid(r)) throw std::runtime_error("thicken: the result is not a valid solid" + refList('F', faces));
+            uint32_t rid = MwEdit::store(k, r);
+            Handle(BRepTools_History) h = historyOf({s, slab}, fuse);
+            h->Merge(u.History());
+            return evolution(rid, {s}, r, h);
+        }
+        // A sheet: the picked faces are consumed; the others stay beside the solid.
+        ShapeMap pick;
+        for (const TopoDS_Face& f : fs) pick.Add(f);
+        BRep_Builder b;
+        TopoDS_Compound out;
+        b.MakeCompound(out);
+        b.Add(out, slab);
+        int rest = 0;
+        for (TopExp_Explorer ex(s, TopAbs_FACE); ex.More(); ex.Next())
+            if (!pick.Contains(ex.Current())) { b.Add(out, ex.Current()); ++rest; }
+        TopoDS_Shape r = rest ? TopoDS_Shape(out) : slab;
+        uint32_t rid = MwEdit::store(k, r);
+        return evolution(rid, {s}, r, nullptr);
+    });
+}
+
 /// Hollow with walls of `thickness` (material inside the current skin). Open
 /// faces are removed; with none the part becomes a closed hollow.
 EvolutionData mwShell(OcctKernel& k, uint32_t id, std::vector<int> openFaces, double thickness) {
@@ -1269,6 +1438,9 @@ EMSCRIPTEN_BINDINGS(meshweave_edit) {
     function("mwFillHole", &mwFillHole);
     function("mwFillet", &mwFillet);
     function("mwChamfer", &mwChamfer);
+    function("mwFilletVar", &mwFilletVar);
+    function("mwChamferRef", &mwChamferRef);
+    function("mwThicken", &mwThicken);
     function("mwShell", &mwShell);
     function("mwOffsetFaces", &mwOffsetFaces);
     function("mwDraft", &mwDraft);
