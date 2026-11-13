@@ -1011,6 +1011,31 @@ EvolutionData mwThicken(OcctKernel& k, uint32_t id, std::vector<int> faces, doub
         bool solidIn = TopExp_Explorer(s, TopAbs_SOLID).More();
         if (solidIn && side == 1)
             throw std::runtime_error("thicken: inward on a solid adds nothing; use Shell or Offset" + refList('F', faces));
+        // A curved face offset toward its own centre by its radius or more
+        // folds through itself; OCCT can still return a "valid" shape (a hole
+        // wall r 5 thickened 6 mm toward the axis did), so refuse it here.
+        for (size_t i = 0; i < fs.size(); ++i) {
+            BRepAdaptor_Surface a(fs[i], false);
+            double rad = 0;
+            switch (a.GetType()) {
+                case GeomAbs_Cylinder: rad = a.Cylinder().Radius(); break;
+                case GeomAbs_Sphere: rad = a.Sphere().Radius(); break;
+                case GeomAbs_Torus: rad = a.Torus().MinorRadius(); break;
+                default: break;
+            }
+            if (rad <= 0) continue;
+            // The surface's own normal points away from its centre; a REVERSED
+            // face's outward normal points toward it.
+            bool rev = fs[i].Orientation() == TopAbs_REVERSED;
+            // out: +t along the face normal; in: -t; both: t/2 each way.
+            double towardCentre = side == 2 ? thickness / 2 : ((side == 1) != rev ? thickness : 0);
+            if (towardCentre >= rad - tol) {
+                std::ostringstream o;
+                o << "thicken: the face curves tighter (radius " << rad << " mm) than the "
+                  << towardCentre << " mm the thickness goes toward its centre" << refList('F', {faces[i]});
+                throw std::runtime_error(o.str());
+            }
+        }
         TopoDS_Shape sheet = sheetOf(fs, tol);
         if (side == 2) {
             BRepOffset_MakeOffset half;
