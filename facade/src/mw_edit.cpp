@@ -885,9 +885,11 @@ EvolutionData mwFilletVar(OcctKernel& k, uint32_t id, std::vector<int> edges, st
         for (size_t i = 0; i < es.size(); ++i) {
             double r1 = r1r2[2 * i], r2 = r1r2[2 * i + 1];
             m.Add(es[i]);
+            int ic = m.Contour(es[i]);
             int iinc = 0;
-            int ic = m.Contains(es[i], iinc);
-            if (!ic) throw std::runtime_error("fillet: the edge cannot be filleted" + refList('E', {edges[i]}));
+            for (int j = 1; ic && j <= m.NbEdges(ic) && !iinc; ++j)
+                if (m.Edge(ic, j).IsSame(es[i])) iinc = j;
+            if (!ic || !iinc) throw std::runtime_error("fillet: the edge cannot be filleted" + refList('E', {edges[i]}));
             // The spine may run the edge backwards (tangent chains orient it);
             // compare its start with the edge's own first vertex.
             gp_Pnt edgeStart = BRep_Tool::Pnt(TopExp::FirstVertex(es[i], false));
