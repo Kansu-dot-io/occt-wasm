@@ -109,6 +109,8 @@
 #include <gp_Dir.hxx>
 #include <gp_GTrsf.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt2d.hxx>
+#include <NCollection_Array1.hxx>
 #include <gp_Sphere.hxx>
 #include <gp_Torus.hxx>
 #include <gp_Trsf.hxx>
@@ -869,7 +871,7 @@ EvolutionData mwChamfer(OcctKernel& k, uint32_t id, std::vector<int> edges, doub
 }
 
 /// Variable-radius fillet: per edge a start and an end radius, varying linearly
-/// along the edge. "Start" is the edge's FIRST VERTEX (the end at its first
+/// along the edge (33 points on the line; see below). "Start" is the edge's FIRST VERTEX (the end at its first
 /// curve parameter, which is also the first point of its tessellated polyline),
 /// whatever direction OCCT's spine runs; r1r2 = [r1, r2] per edge.
 EvolutionData mwFilletVar(OcctKernel& k, uint32_t id, std::vector<int> edges, std::vector<double> r1r2) {
@@ -896,7 +898,18 @@ EvolutionData mwFilletVar(OcctKernel& k, uint32_t id, std::vector<int> edges, st
             gp_Pnt spineStart = BRep_Tool::Pnt(TopExp::FirstVertex(m.Edge(ic, iinc), true));
             if (edgeStart.Distance(spineStart) > tol + BRep_Tool::Tolerance(TopExp::FirstVertex(es[i], false)))
                 std::swap(r1, r2);
-            m.SetRadius(r1, r2, ic, iinc);
+            // SetRadius(r1, r2) gives OCCT's smooth S law (Law_Interpol with
+            // zero end slopes), not a straight line; a Law_Function set before
+            // Build is dropped (ChFiDS_FilSpine::SetRadius(Law) only clears).
+            // So: points on the straight line, relative along the edge; the
+            // interpolant through them is linear but for a sliver at each end.
+            constexpr int kLawPts = 33;
+            NCollection_Array1<gp_Pnt2d> law(1, kLawPts);
+            for (int q = 0; q < kLawPts; ++q) {
+                double u = double(q) / (kLawPts - 1);
+                law(q + 1) = gp_Pnt2d(u, r1 + (r2 - r1) * u);
+            }
+            m.SetRadius(law, ic, iinc);
         }
         try { m.Build(); } catch (const Standard_Failure&) {}
         if (!m.IsDone()) {
