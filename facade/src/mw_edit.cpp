@@ -131,10 +131,7 @@ using AncestorMap =
     NCollection_IndexedDataMap<TopoDS_Shape, NCollection_List<TopoDS_Shape>, TopTools_ShapeMapHasher>;
 
 /// The kernel's arena is private; occt_kernel.h names this struct a friend.
-struct MwEdit {
-    static uint32_t store(OcctKernel& k, const TopoDS_Shape& s) { return k.store(s); }
-    static const TopoDS_Shape& get(OcctKernel& k, uint32_t id) { return k.get(id); }
-};
+#include "mw_access.h"
 
 namespace {
 

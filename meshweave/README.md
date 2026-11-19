@@ -11,6 +11,12 @@ in-browser STEP/BREP reader). This branch is upstream
   functions (`Module.mwSplitPlane(kernel, ...)` etc.) in their own
   `EMSCRIPTEN_BINDINGS` block.
 - one `friend struct MwEdit;` line in `facade/include/occt_kernel.h`.
+- `facade/src/mw_read.cpp` (since v5.6.0-mw.4) — reading open formats on the
+  device: IGES through OCCT's IGES translator (`mwImportIges`; `libTKDEIGES.a`
+  is linked again), a trimmed NURBS face from poles/knots/edges for the Rhino
+  .3dm reader (`mwNurbsFace`), sewing into solids with cavities kept
+  (`mwSewBody`, `mwSolidify`) and a shell report (`mwShellReport`).
+  `facade/include/mw_access.h` holds the `MwEdit` arena accessor both files use.
 - `.gitmodules` points at [Kansu-dot-io/OCCT](https://github.com/Kansu-dot-io/OCCT),
   a mirror of the OCCT commit upstream uses (`git ls-tree HEAD occt`): OCCT
   8.0.1 plus two upstream patches. MeshWeave does not modify OCCT.

@@ -158,8 +158,8 @@ fn compile_facade(sh: &Shell, root: &Path) -> Result<Vec<PathBuf>> {
 
 /// OCCT static libraries not used by the facade — excluded from linking.
 const EXCLUDED_LIBS: &[&str] = &[
-    // IGES exchange (deliberately excluded — STEP is the modern standard, saves ~1-2 MB)
-    "libTKDEIGES.a",
+    // IGES exchange is LINKED in MeshWeave's build (mw_read.cpp mwImportIges):
+    // private mode reads IGES on the device (LOCAL_ONLY_L3_PLAN.md).
     // Persistence / serialization
     "libTKStd.a",
     "libTKStdL.a",
