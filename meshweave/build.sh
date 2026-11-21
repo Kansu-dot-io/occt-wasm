@@ -7,7 +7,8 @@
 #   - OCCT: the `occt` submodule (github.com/Kansu-dot-io/OCCT, a mirror of
 #     github.com/andymai/OCCT), pinned by commit. MeshWeave does not modify it.
 #   - the facade (MIT OR Apache-2.0): upstream occt-wasm, plus the hand-written
-#     facade/src/mw_edit.cpp and one `friend` line in facade/include/occt_kernel.h.
+#     facade/src/mw_edit.cpp, mw_read.cpp and mw_geom.cpp, and one `friend` line
+#     in facade/include/occt_kernel.h.
 #
 # Usage:  meshweave/build.sh [out-dir]          (needs docker)
 #   FROM_SOURCE=1 meshweave/build.sh            builds the OCCT static libs from

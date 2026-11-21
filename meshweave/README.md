@@ -17,6 +17,15 @@ in-browser STEP/BREP reader). This branch is upstream
   .3dm reader (`mwNurbsFace`), sewing into solids with cavities kept
   (`mwSewBody`, `mwSolidify`) and a shell report (`mwShellReport`).
   `facade/include/mw_access.h` holds the `MwEdit` arena accessor both files use.
+- `facade/src/mw_geom.cpp` (since v5.6.0-mw.5) — generic OCCT geometry and
+  topology bindings for MeshWeave's device-side readers: the gp value types,
+  Geom/Geom2d curves and surfaces as `opencascade::handle<T>` embind smart
+  pointers, TopoDS shapes, BRep_Builder/BRep_Tool/TopExp, the BRepBuilderAPI
+  makers, sewing, ShapeFix_Face, projections, GeomAPI_IntSS, interpolation,
+  mass properties, BRepMesh and Poly_Triangulation, under OCCT's own names
+  (statics with a `_s` suffix, tuple out-parameters as arrays). Plus
+  `mwStoreShape`/`mwGetShape` (a shape into / out of the kernel arena) and
+  `mwWhat` (the class and message of an OCCT exception that reached JS).
 - `.gitmodules` points at [Kansu-dot-io/OCCT](https://github.com/Kansu-dot-io/OCCT),
   a mirror of the OCCT commit upstream uses (`git ls-tree HEAD occt`): OCCT
   8.0.1 plus two upstream patches. MeshWeave does not modify OCCT.
